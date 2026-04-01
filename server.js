@@ -8,10 +8,21 @@ const PORT    = process.env.PORT || 3001;
 const DB_FILE = path.join(__dirname, 'licenses.json');
 const ADMIN_PASS = process.env.ADMIN_PASS || 'callysta2024';
 
+// ── KALICI (SİLİNMEYEN) LİSANSLAR ────────────────────
+// Masaüstü uygulamasında (gemini) "Lisans Doğrulanamadı" ekranında yazan 
+// Makine Kimliğini (HWID) kopyalayarak aşağıdaki ilgili alana yapıştırın.
+// Render sunucusu uykuya dalsa da, yeniden başlasa da burası ASLA silinmez.
+const SABIT_LISANSLAR = [
+  { hwid: "707ce95f1157ee0a9dad676443ddf278", shopName: "TECHNODİYARI", active: true, key: "kalici-cly-1", expiresAt: null },
+  { hwid: "HWID_BURAYA", shopName: "Dağkapı Şubesi", active: true, key: "kalici-cly-2", expiresAt: null },
+  { hwid: "HWID_BURAYA", shopName: "Çiftkapı Şubesi", active: true, key: "kalici-cly-3", expiresAt: null },
+  { hwid: "HWID_BURAYA", shopName: "Yedek Kasa", active: true, key: "kalici-cly-4", expiresAt: null }
+];
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ── Lisans DB ────────────────────────────────────────
+// ── Lisans DB (Geçici Panel Verileri İçin) ───────────
 function readDB() {
   try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); }
   catch { return { licenses: [] }; }
@@ -25,8 +36,14 @@ app.get('/api/check', (req, res) => {
   const { hwid } = req.query;
   if (!hwid) return res.json({ valid: false, message: 'HWID eksik' });
 
-  const db  = readDB();
-  const lic = db.licenses.find(l => l.hwid === hwid);
+  // 1. Önce ASLA silinmeyen sabit lisanslara bakıyoruz
+  let lic = SABIT_LISANSLAR.find(l => l.hwid === hwid);
+
+  // 2. Eğer sabit listede yoksa, panelden eklenen listeye bak
+  if (!lic) {
+    const db = readDB();
+    lic = db.licenses.find(l => l.hwid === hwid);
+  }
 
   if (!lic)          return res.json({ valid: false, message: 'Bu cihaza lisans tanımlanmamış.\nLütfen yetkili kişiyle iletişime geçin.' });
   if (!lic.active)   return res.json({ valid: false, message: 'Lisansınız askıya alınmıştır.\nBilgi için yetkili kişiyle iletişime geçin.' });
@@ -37,9 +54,13 @@ app.get('/api/check', (req, res) => {
     if (new Date() > exp) return res.json({ valid: false, message: `Lisans süresi doldu (${lic.expiresAt}).\nYenileme için yetkili kişiyle iletişime geçin.` });
   }
 
-  // Son görülme güncelle
-  lic.lastSeen = new Date().toISOString();
-  writeDB(db);
+  // Sadece panelden eklenenlerin son görülmesini güncelliyoruz
+  const db = readDB();
+  const dbLic = db.licenses.find(l => l.hwid === hwid);
+  if (dbLic) {
+    dbLic.lastSeen = new Date().toISOString();
+    writeDB(db);
+  }
 
   res.json({ valid: true, key: lic.key, shop: lic.shopName });
 });
@@ -62,6 +83,7 @@ tr:hover td{background:#0f1220}
 .badge-ok{background:#0d2b1a;color:#22c55e;border:1px solid #22c55e40}
 .badge-off{background:#2d0f0f;color:#ef4444;border:1px solid #ef444440}
 .badge-exp{background:#2d1a00;color:#f97316;border:1px solid #f9731640}
+.badge-hardcoded{background:#1e3a8a;color:#60a5fa;border:1px solid #3b82f640}
 input,select{background:#0f1220;border:1px solid #2a3050;border-radius:8px;color:#e8eaf0;padding:8px 12px;font-size:13px;width:100%}
 .form-row{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}
 button{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600}
@@ -87,9 +109,9 @@ label{display:block;font-size:12px;color:#5a6280;margin-bottom:4px}
 <div class="sub">Mağaza lisanslarını buradan yönetin</div>
 
 <div class="card">
-  <div style="font-size:13px;font-weight:600;margin-bottom:12px">➕ Yeni Lisans Ekle</div>
+  <div style="font-size:13px;font-weight:600;margin-bottom:12px">➕ Yeni Geçici Lisans Ekle (Test/Geçici Cihazlar)</div>
   <div class="form-row">
-    <div><label>Mağaza Adı</label><input id="shopName" placeholder="Örn: Mağaza İstanbul"></div>
+    <div><label>Mağaza Adı</label><input id="shopName" placeholder="Örn: Geçici Kasa"></div>
     <div><label>HWID (Makine Kimliği)</label><input id="hwid" placeholder="Cihazdan kopyalayın"></div>
     <div><label>Son Geçerlilik (boş=süresiz)</label><input type="date" id="expires"></div>
     <button class="btn-add" onclick="addLicense()">Ekle</button>
@@ -126,20 +148,31 @@ function renderTable(licenses) {
   const now = new Date();
   document.getElementById('tbody').innerHTML = licenses.map(l => {
     const expired = l.expiresAt && new Date(l.expiresAt) < now;
-    const status  = !l.active ? '<span class="badge badge-off">Pasif</span>'
-                  : expired   ? '<span class="badge badge-exp">Süresi Doldu</span>'
-                              : '<span class="badge badge-ok">Aktif</span>';
-    const seen = l.lastSeen ? new Date(l.lastSeen).toLocaleString('tr-TR') : '—';
+    const isHardcoded = String(l.key).includes('kalici');
+    let status = '';
+    
+    if (isHardcoded) {
+        status = '<span class="badge badge-hardcoded">Kalıcı (Koddan)</span>';
+    } else {
+        status  = !l.active ? '<span class="badge badge-off">Pasif</span>'
+                : expired   ? '<span class="badge badge-exp">Süresi Doldu</span>'
+                            : '<span class="badge badge-ok">Aktif</span>';
+    }
+    
+    const seen = l.lastSeen ? new Date(l.lastSeen).toLocaleString('tr-TR') : (isHardcoded ? 'Her Zaman Aktif' : '—');
+    
+    const actions = isHardcoded 
+        ? '<span style="font-size:11px;color:#5a6280">Koddan Değiştirin</span>'
+        : \`<button class="btn-tog" onclick="toggle('\${l.hwid}')">\${l.active?'Askıya Al':'Aktif Et'}</button>
+           <button class="btn-del" onclick="del('\${l.hwid}')">Sil</button>\`;
+
     return \`<tr>
       <td><b>\${l.shopName||'—'}</b></td>
       <td style="font-family:monospace;font-size:11px">\${l.hwid}</td>
       <td>\${status}</td>
       <td>\${l.expiresAt||'Süresiz'}</td>
       <td style="font-size:11px;color:#5a6280">\${seen}</td>
-      <td style="display:flex;gap:6px">
-        <button class="btn-tog" onclick="toggle('\${l.hwid}')">\${l.active?'Askıya Al':'Aktif Et'}</button>
-        <button class="btn-del" onclick="del('\${l.hwid}')">Sil</button>
-      </td>
+      <td style="display:flex;gap:6px">\${actions}</td>
     </tr>\`;
   }).join('');
 }
@@ -162,13 +195,19 @@ function addLicense() {
 
 function toggle(hwid) {
   fetch('/api/admin/toggle', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ pass, hwid }) }).then(r=>r.json()).then(d=>{ if(d.licenses) renderTable(d.licenses); });
+    body: JSON.stringify({ pass, hwid }) }).then(r=>r.json()).then(d=>{
+        if(d.error) alert(d.error);
+        else if(d.licenses) renderTable(d.licenses); 
+    });
 }
 
 function del(hwid) {
   if(!confirm('Bu lisansı silmek istediğinize emin misiniz?')) return;
   fetch('/api/admin/delete', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ pass, hwid }) }).then(r=>r.json()).then(d=>{ if(d.licenses) renderTable(d.licenses); });
+    body: JSON.stringify({ pass, hwid }) }).then(r=>r.json()).then(d=>{ 
+        if(d.error) alert(d.error);
+        else if(d.licenses) renderTable(d.licenses); 
+    });
 }
 </script></body></html>`;
 
@@ -179,15 +218,20 @@ function checkPass(p) { return p === ADMIN_PASS; }
 
 app.get('/api/admin/list', (req, res) => {
   if (!checkPass(req.query.pass)) return res.json({ error: 'Hatalı şifre' });
-  res.json(readDB().licenses);
+  const allLicenses = [...SABIT_LISANSLAR, ...readDB().licenses];
+  res.json(allLicenses);
 });
 
 app.post('/api/admin/add', (req, res) => {
   const { pass, shopName, hwid, expiresAt } = req.body;
   if (!checkPass(pass)) return res.json({ error: 'Hatalı şifre' });
   if (!hwid) return res.json({ error: 'HWID zorunlu' });
+  
   const db = readDB();
-  if (db.licenses.find(l => l.hwid === hwid)) return res.json({ error: 'Bu HWID zaten kayıtlı' });
+  if (SABIT_LISANSLAR.find(l => l.hwid === hwid) || db.licenses.find(l => l.hwid === hwid)) {
+    return res.json({ error: 'Bu HWID zaten kayıtlı' });
+  }
+  
   db.licenses.push({
     hwid, shopName: shopName || 'Mağaza',
     active: true, expiresAt: expiresAt || null,
@@ -196,27 +240,40 @@ app.post('/api/admin/add', (req, res) => {
     lastSeen: null
   });
   writeDB(db);
-  res.json({ success: true, licenses: db.licenses });
+  const allLicenses = [...SABIT_LISANSLAR, ...db.licenses];
+  res.json({ success: true, licenses: allLicenses });
 });
 
 app.post('/api/admin/toggle', (req, res) => {
   const { pass, hwid } = req.body;
   if (!checkPass(pass)) return res.json({ error: 'Hatalı şifre' });
+  
+  if (SABIT_LISANSLAR.find(l => l.hwid === hwid)) {
+      return res.json({ error: 'Sabit lisanslar panelden durdurulamaz. server.js dosyasından kaldırmalısınız.' });
+  }
+
   const db = readDB();
   const l  = db.licenses.find(l => l.hwid === hwid);
   if (!l) return res.json({ error: 'Bulunamadı' });
   l.active = !l.active;
   writeDB(db);
-  res.json({ success: true, licenses: db.licenses });
+  const allLicenses = [...SABIT_LISANSLAR, ...db.licenses];
+  res.json({ success: true, licenses: allLicenses });
 });
 
 app.post('/api/admin/delete', (req, res) => {
   const { pass, hwid } = req.body;
   if (!checkPass(pass)) return res.json({ error: 'Hatalı şifre' });
+  
+  if (SABIT_LISANSLAR.find(l => l.hwid === hwid)) {
+      return res.json({ error: 'Sabit lisanslar panelden silinemez. server.js dosyasından kaldırmalısınız.' });
+  }
+
   const db = readDB();
   db.licenses = db.licenses.filter(l => l.hwid !== hwid);
   writeDB(db);
-  res.json({ success: true, licenses: db.licenses });
+  const allLicenses = [...SABIT_LISANSLAR, ...db.licenses];
+  res.json({ success: true, licenses: allLicenses });
 });
 
-app.listen(PORT, () => console.log(`Callysta Lisans Sunucusu: http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Callysta Telekomünikasyon Lisans Sunucusu: http://localhost:${PORT}`));
